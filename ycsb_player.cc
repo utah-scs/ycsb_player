@@ -4,22 +4,36 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <unistd.h>
+#include <boost/smart_ptr/detail/spinlock.hpp>
 #include "FifoQueue.h"
 
 #include <libmemcached/memcached.h>
 #define PRIVATE private
 #include "../memcached-1.4.15-cleaner/Cycles.h"
 
-#define VALUE_LENGTH 25
+int VALUE_LENGTH = 25;
+
+// If true, when we do a get() and it isn't the expected length, do a new
+// set with the new length. This simulates updating the cache when software
+// adds a new field.
+bool UPDATE_CHANGED_VALUE_LENGTH = true;
+
+// XXX Not reason why this is should a separate flag from the '-s' parameter, no?
+bool USE_LENGTH_FROM_FILE = true;
 
 static char randomChars[100000];
 
-#define MEMCACHED_THREADS 8
+#define MEMCACHED_THREADS 16
 
 std::atomic<uint64_t> getAttempts(0);
 std::atomic<uint64_t> getFailures(0);
 std::atomic<uint64_t> setAttempts(0);
 std::atomic<uint64_t> setFailures(0);
+uint32_t linesProcessed = 0;
+
+// Set to true to cause memcached worker threads to quit
+static volatile bool threadsQuit = false;
 
 class Operation {
   public:
@@ -43,12 +57,12 @@ class Operation {
 
 #define MAX_QUEUE_LENGTH 1000
 FifoQueue<Operation> queue;
-std::mutex queueLock;
+boost::detail::spinlock queueLock;
 
 void
 issueSet(memcached_st* memc, char* key, int valueLen)
 {
-    assert(valueLen <= sizeof(randomChars));
+    assert(valueLen <= (int)sizeof(randomChars));
     char* value = &randomChars[random() % (sizeof(randomChars) - valueLen)];
 
     setAttempts++;
@@ -80,6 +94,8 @@ issueGet(memcached_st* memc, char* key)
             exit(1);
         }
     } else {
+        if (UPDATE_CHANGED_VALUE_LENGTH && (int)valueLength != VALUE_LENGTH)
+            issueSet(memc, key, VALUE_LENGTH);
         free(ret);
     }
 }
@@ -89,6 +105,25 @@ memcachedThread()
 {
     memcached_st* memc = memcached_create(NULL);
     memcached_return rc;
+#if 0
+    rc = memcached_behavior_set(memc, MEMCACHED_BEHAVIOR_BINARY_PROTOCOL, 1);
+    if (rc != MEMCACHED_SUCCESS) {
+        fprintf(stderr, "failed to set binary protocol\n");
+        exit(1);
+    }
+
+    rc = memcached_behavior_set(memc, MEMCACHED_BEHAVIOR_USE_UDP, 1);
+    if (rc != MEMCACHED_SUCCESS) {
+        fprintf(stderr, "failed to set udp protocol\n");
+        exit(1);
+    }
+#endif
+    rc = memcached_behavior_set(memc, MEMCACHED_BEHAVIOR_NO_BLOCK, 1);
+    if (rc != MEMCACHED_SUCCESS) {
+        fprintf(stderr, "failed to set non-blocking IO\n");
+        exit(1);
+    }
+
     memcached_server_st* servers = memcached_server_list_append(NULL, "127.0.0.1", 11211, &rc);
     if (servers == NULL) {
         fprintf(stderr, "memcached_server_list_append failed: %d\n", (int)rc);
@@ -96,11 +131,11 @@ memcachedThread()
     }
     rc = memcached_server_push(memc, servers);
     if (rc != MEMCACHED_SUCCESS) {
-        fprintf(stderr, "memcached_server_push failed: %d\n", (int)rc);
+        fprintf(stderr, "memcached_server_push failed: %d (%s)\n", (int)rc, memcached_strerror(memc, rc));
         exit(1);
     }
 
-    while (1) {
+    while (!threadsQuit) {
         queueLock.lock();
         if (queue.empty()) {
             queueLock.unlock();
@@ -119,6 +154,26 @@ memcachedThread()
             exit(1);
         }
     }
+
+    fprintf(stderr, "memcached worker thread exiting\n");
+}
+
+int
+getValueLength(char* line)
+{
+    if (USE_LENGTH_FROM_FILE) {
+        // XXX- this only works if a single field is given
+        if (strchr(line, '[') != NULL)
+            return (int)(strchr(line, ']') - strchr(line, '[')) - 10;
+
+        // if there are no fields explicitly listed, then assume this has been run
+        // through ycsb_munge.py and the key was stripped in favour of its byte length
+        int length;
+        sscanf(line, "%*s %*s %*s %d\n", &length);
+        return length;
+    }
+
+    return VALUE_LENGTH;
 }
 
 // this method can parse through about 4M operations/sec from the ycsb
@@ -146,14 +201,19 @@ handleOp(char *line)
         queue.push(Operation());
         queue.back().type = Operation::GET;
         sscanf(line, "READ usertable %s [", queue.back().key);
+        linesProcessed++;
     } else if (line[0] == 'I') {
         queue.push(Operation());
         queue.back().type = Operation::SET;
         sscanf(line, "INSERT usertable %s [", queue.back().key);
-        queue.back().valueLength = VALUE_LENGTH;
-
-        // XXX- this only works if a single field is given
-        //valueLen = (int)(strchr(line, ']') - strchr(line, '[')) - 10;
+        queue.back().valueLength = getValueLength(line);
+        linesProcessed++;
+    } else if (line[0] == 'U') {
+        queue.push(Operation());
+        queue.back().type = Operation::SET;
+        sscanf(line, "UPDATE usertable %s [", queue.back().key);
+        queue.back().valueLength = getValueLength(line);
+        linesProcessed++;
     }
 
     queueLock.unlock();
@@ -162,43 +222,96 @@ handleOp(char *line)
 int
 main(int argc, char** argv)
 {
-    if (argc != 2) {
-        fprintf(stderr, "usage: %s ycsb-basic-workload-dump\n", argv[0]);
+    int opt;
+    char* progname = argv[0];
+
+    while ((opt = getopt(argc, argv, "fs:")) != -1) {
+        switch (opt) {
+        case 'f':
+            USE_LENGTH_FROM_FILE = false;
+            break;
+        case 's':
+            VALUE_LENGTH = atoi(optarg);
+            break;
+        }
+    }
+    argc -= optind;
+    argv += optind;
+
+    if (argc < 1) {
+        fprintf(stderr, "usage: %s ycsb-basic-workload-dump [...]\n", progname);
         exit(1);
     }
 
-    for (int i = 0; i < sizeof(randomChars); i++)
+    for (int i = 0; i < (int)sizeof(randomChars); i++)
         randomChars[i] = '!' + (random() % ('~' - '!' + 1));
 
-    printf("spinning %d memcached worker threads\n", MEMCACHED_THREADS);
+    printf("#spinning %d memcached worker threads\n", MEMCACHED_THREADS);
+    std::thread* threads[MEMCACHED_THREADS];
     for (int i = 0; i < MEMCACHED_THREADS; i++)
-        new std::thread(memcachedThread);
+        threads[i] = new std::thread(memcachedThread);
+
+    printf("# UPDATE_CHANGED_VALUE_LENGTH = %s\n", (UPDATE_CHANGED_VALUE_LENGTH) ? "true" : "false");
+    printf("# USE_LENGTH_FROM_FILE = %s\n", (USE_LENGTH_FROM_FILE) ? "true" : "false");
+    printf("# VALUE_LENGTH = %d (ONLY APPLIES IF !USE_LENGTH_FROM_FILE)\n", VALUE_LENGTH);
 
     char buf[1000];
-    FILE* fp = fopen(argv[1], "r");
     uint64_t start = RAMCloud::Cycles::rdtsc();
-    uint64_t lastOutput = start;
-    uint32_t chill = 0;
-    while (fgets(buf, sizeof(buf), fp) != NULL) {
-        handleOp(buf);
+    uint64_t lastGetAttempts = 0;
+    uint64_t lastGetFailures = 0;
+    uint64_t lastSetAttempts = 0;
+    uint64_t lastSetFailures = 0;
+    uint32_t lastLinesProcessed = 0;
 
-        if ((chill++ & 0xff) == 0) {
-            uint64_t now = RAMCloud::Cycles::rdtsc();
-            double elapsed = RAMCloud::Cycles::toSeconds(now - start);
-            double sinceLastOutput = RAMCloud::Cycles::toSeconds(now - lastOutput);
-            if (sinceLastOutput >= 5) {
-                printf("----------------------\n");
-                printf("Get Attempts: %e\n", (double)getAttempts);
-                printf("    Failures: %e  (%.5f%% misses)\n", (double)getFailures, (double)getFailures / (double)getAttempts * 100);
-                printf("    /sec:     %lu\n", (uint64_t)(((double)getAttempts) / elapsed));
-                
-                printf("Set Attempts: %e\n", (double)setAttempts);
-                printf("    Failures: %e  (%.5f%% failures)\n", (double)setFailures, (double)setFailures / (double)setAttempts * 100);
-                printf("    /sec:     %lu\n", (uint64_t)(((double)setAttempts) / elapsed));
-                lastOutput = now;
+    while (argc > 0) {
+        printf("# Using workload file [%s]\n", argv[0]);
+        FILE* fp = fopen(argv[0], "r");
+        assert(fp != NULL);
+        while (fgets(buf, sizeof(buf), fp) != NULL) {
+            handleOp(buf);
+
+            if ((linesProcessed - lastLinesProcessed) == 1000000) {
+                    lastLinesProcessed = linesProcessed;
+#if 0
+                    printf("----------------------\n");
+                    printf("Get Attempts: %e\n", (double)getAttempts);
+                    printf("    Failures: %e  (%.5f%% misses)\n", (double)getFailures, (double)getFailures / (double)getAttempts * 100);
+                    printf("    /sec:     %lu\n", (uint64_t)(((double)getAttempts) / elapsed));
+                    printf("    Fails Last %.0fs:  %e  (%.5f%% misses)\n",
+                        outputInterval,
+                        (double)(getFailures - lastGetFailures),
+                        (double)(getFailures - lastGetFailures) / (double)(getAttempts - lastGetAttempts) * 100);
+                    
+                    printf("Set Attempts: %e\n", (double)setAttempts);
+                    printf("    Failures: %e  (%.5f%% failures)\n", (double)setFailures, (double)setFailures / (double)setAttempts * 100);
+                    printf("    /sec:     %lu\n", (uint64_t)(((double)setAttempts) / elapsed));
+                    printf("    Fails Last %.0fs:  %e  (%.5f%% of attempts)\n",
+                        outputInterval
+                        (double)(setFailures - lastSetFailures),
+                        (double)(setFailures - lastSetFailures) / (double)(setAttempts - lastSetAttempts) * 100);
+#endif
+                    double elapsed = RAMCloud::Cycles::toSeconds(RAMCloud::Cycles::rdtsc() - start);
+                    printf("%-10u lines   %.1f s   %e ops   %.5f%% misses   %.5f%% recently    %e set failures\n",
+                        linesProcessed,
+                        elapsed,
+                        (double)(getAttempts + setAttempts),
+                        (double)getFailures / (double)getAttempts * 100,
+                        (double)(getFailures - lastGetFailures) / (double)(getAttempts - lastGetAttempts)* 100, (double)setFailures);
+                    fflush(stdout);
+                    lastGetAttempts = getAttempts;
+                    lastGetFailures = getFailures;
+                    lastSetAttempts = setAttempts;
+                    lastSetFailures = setFailures;
             }
         }
+        argc--;
+        argv++;
+        VALUE_LENGTH *= 2;
     }
+
+    threadsQuit = true;
+    for (int i = 0; i < MEMCACHED_THREADS; i++)
+        threads[i]->join();
 
     return 0;
 }
