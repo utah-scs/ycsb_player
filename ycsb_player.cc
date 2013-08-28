@@ -94,8 +94,10 @@ issueGet(memcached_st* memc, char* key)
             exit(1);
         }
     } else {
-        if (UPDATE_CHANGED_VALUE_LENGTH && (int)valueLength != VALUE_LENGTH)
+        if (UPDATE_CHANGED_VALUE_LENGTH && (int)valueLength != VALUE_LENGTH) {
+            getFailures++;
             issueSet(memc, key, VALUE_LENGTH);
+        }
         free(ret);
     }
 }
@@ -224,11 +226,15 @@ main(int argc, char** argv)
 {
     int opt;
     char* progname = argv[0];
+    uint32_t periodicity = 100000;
 
-    while ((opt = getopt(argc, argv, "fs:")) != -1) {
+    while ((opt = getopt(argc, argv, "fP:s:")) != -1) {
         switch (opt) {
         case 'f':
             USE_LENGTH_FROM_FILE = false;
+            break;
+        case 'P':
+            periodicity = atoi(optarg);
             break;
         case 's':
             VALUE_LENGTH = atoi(optarg);
@@ -270,7 +276,7 @@ main(int argc, char** argv)
         while (fgets(buf, sizeof(buf), fp) != NULL) {
             handleOp(buf);
 
-            if ((linesProcessed - lastLinesProcessed) == 1000000) {
+            if ((linesProcessed - lastLinesProcessed) == periodicity) {
                     lastLinesProcessed = linesProcessed;
 #if 0
                     printf("----------------------\n");
