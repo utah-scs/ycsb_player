@@ -1,16 +1,20 @@
 #include <thread>
 #include <assert.h>
-#include <stdatomic.h>
+#include <atomic>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <boost/smart_ptr/detail/spinlock.hpp>
 #include "FifoQueue.h"
+#include <vector>
 
 #include <libmemcached/memcached.h>
 #define PRIVATE private
 #include "../memcached-1.4.15-cleaner/Cycles.h"
+
+static const bool takeLatencySamples = true;
+static const size_t maxSamples = 1 * 1000 * 1000;
 
 int VALUE_LENGTH = 25;
 
@@ -74,13 +78,18 @@ issueSet(memcached_st* memc, char* key, int valueLen)
 }
 
 void
-issueGet(memcached_st* memc, char* key)
+issueGet(memcached_st* memc, char* key, std::vector<uint64_t>& getSamples)
 {
     memcached_return rc;
     uint32_t flags;
     size_t valueLength;
 
     getAttempts++;
+
+    uint64_t start;
+    if (takeLatencySamples)
+      start = RAMCloud::Cycles::rdtsc();
+
     char* ret = memcached_get(memc, key, strlen(key), &valueLength, &flags, &rc);
     if (ret == NULL) {
         //fprintf(stderr, "get rc == %d (%s)\n", (int)rc, memcached_strerror(memc, rc));
@@ -94,6 +103,12 @@ issueGet(memcached_st* memc, char* key)
             exit(1);
         }
     } else {
+        if (takeLatencySamples &&
+            (start & 0xfff) == 0x010 &&
+            getSamples.size() != maxSamples)
+        {
+            getSamples.emplace_back(RAMCloud::Cycles::rdtsc() - start);
+        }
         if (UPDATE_CHANGED_VALUE_LENGTH && (int)valueLength != VALUE_LENGTH) {
             getFailures++;
             issueSet(memc, key, VALUE_LENGTH);
@@ -105,6 +120,12 @@ issueGet(memcached_st* memc, char* key)
 void
 memcachedThread()
 {
+    std::vector<uint64_t> getSamples{};
+    std::vector<uint64_t> setSamples{};
+    if (takeLatencySamples) {
+      getSamples.reserve(maxSamples);
+      setSamples.reserve(maxSamples);
+    }
     memcached_st* memc = memcached_create(NULL);
     memcached_return rc;
 #if 0
@@ -148,14 +169,32 @@ memcachedThread()
         queueLock.unlock();
 
         if (op.type == Operation::GET) {
-            issueGet(memc, op.key);
+            issueGet(memc, op.key, getSamples);
         } else if (op.type == Operation::SET) {
-            issueSet(memc, op.key, op.valueLength);
+            uint64_t start;
+            if (takeLatencySamples)
+              start = RAMCloud::Cycles::rdtsc();
+            if (takeLatencySamples &&
+                (start & 0xfff) == 0x010 &&
+                setSamples.size() != maxSamples)
+            {
+              setSamples.emplace_back(start);
+              issueSet(memc, op.key, op.valueLength);
+              setSamples.back() = RAMCloud::Cycles::rdtsc() - setSamples.back();
+            } else {
+              issueSet(memc, op.key, op.valueLength);
+            }
         } else {
             fprintf(stderr, "invalid operation!\n");
             exit(1);
         }
     }
+
+    for (uint64_t s : getSamples)
+      printf("GET %lu ns\n", RAMCloud::Cycles::toNanoseconds(s));
+
+    for (uint64_t s : setSamples)
+      printf("SET %lu ns\n", RAMCloud::Cycles::toNanoseconds(s));
 
     fprintf(stderr, "memcached worker thread exiting\n");
 }
@@ -266,13 +305,15 @@ main(int argc, char** argv)
     uint64_t lastGetAttempts = 0;
     uint64_t lastGetFailures = 0;
     uint64_t lastSetAttempts = 0;
-    uint64_t lastSetFailures = 0;
+    //uint64_t lastSetFailures = 0;
     uint32_t lastLinesProcessed = 0;
+    double lastElapsed = 0;
 
     while (argc > 0) {
         printf("# Using workload file [%s]\n", argv[0]);
         FILE* fp = fopen(argv[0], "r");
         assert(fp != NULL);
+
         while (fgets(buf, sizeof(buf), fp) != NULL) {
             handleOp(buf);
 
@@ -296,18 +337,27 @@ main(int argc, char** argv)
                         (double)(setFailures - lastSetFailures),
                         (double)(setFailures - lastSetFailures) / (double)(setAttempts - lastSetAttempts) * 100);
 #endif
+                    uint64_t newGets = getAttempts - lastGetAttempts;
+                    uint64_t newSets = setAttempts - lastSetAttempts;
+                    uint64_t newAttempts = newGets + newSets;
+
                     double elapsed = RAMCloud::Cycles::toSeconds(RAMCloud::Cycles::rdtsc() - start);
-                    printf("%-10u lines   %.1f s   %e ops   %.5f%% misses   %.5f%% recently    %e set failures\n",
+                    double periodSecs = elapsed - lastElapsed;
+                    lastElapsed = elapsed;
+                    printf("%-10u lines   %.1f s   %e ops   %.5f%% misses   %.5f%% recently    %e set failures    %.2f op/s    %.2f current op/s\n",
                         linesProcessed,
                         elapsed,
                         (double)(getAttempts + setAttempts),
                         (double)getFailures / (double)getAttempts * 100,
-                        (double)(getFailures - lastGetFailures) / (double)(getAttempts - lastGetAttempts)* 100, (double)setFailures);
+                        (double)(getFailures - lastGetFailures) / (double)(getAttempts - lastGetAttempts)* 100,
+                        (double)setFailures,
+                        double(getAttempts + setAttempts) / elapsed,
+                        double(newAttempts) / periodSecs);
                     fflush(stdout);
                     lastGetAttempts = getAttempts;
                     lastGetFailures = getFailures;
                     lastSetAttempts = setAttempts;
-                    lastSetFailures = setFailures;
+                    //lastSetFailures = setFailures;
             }
         }
         argc--;
