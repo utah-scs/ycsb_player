@@ -11,7 +11,7 @@
 
 #include <libmemcached/memcached.h>
 #define PRIVATE private
-#include "../memcached-1.4.15-cleaner/Cycles.h"
+#include "../memshare/Cycles.h"
 
 static const bool takeLatencySamples = true;
 static const size_t maxSamples = 1 * 1000 * 1000;
