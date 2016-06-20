@@ -21,7 +21,8 @@ class Benchmark {
  private:
   virtual void warmup(size_t threadId) {}
   virtual void run(size_t threadId) = 0;
-  virtual void dump(double time) {}
+  virtual void dumpHeader() {}
+  virtual void dump(double time, double interval) {}
 
   void entry(size_t threadId);
 
@@ -32,10 +33,23 @@ class Benchmark {
   std::vector<memcached_st*> clients;
   std::vector<std::thread> threads;
 
+  double lastDumpSeconds;
+
   std::atomic<size_t> nReady;
   std::atomic<bool> go;
   std::atomic<bool> stop;
   std::atomic<size_t> nDone;
+};
+
+class PRNG {
+ public:
+  PRNG();
+  PRNG(uint64_t seed);
+  void reseed(uint64_t seed);
+  uint64_t operator()();
+
+ private:
+  uint64_t x, y, z;
 };
 
 #endif

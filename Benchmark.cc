@@ -13,6 +13,7 @@ Benchmark::Benchmark(size_t port, size_t nThreads, double seconds)
   , seconds{seconds}
   , clients{}
   , threads{}
+  , lastDumpSeconds{}
   , nReady{}
   , go{}
   , stop{}
@@ -56,6 +57,8 @@ Benchmark::start()
     clients.emplace_back(memc);
   }
 
+  dumpHeader();
+
   for (size_t i = 0; i < nThreads; ++i)
     threads.emplace_back(&Benchmark::entry, this, i);
 
@@ -71,7 +74,9 @@ Benchmark::start()
   while (true) {
     uint64_t now = Cycles::rdtsc();
     if (nextDumpTs < now) {
-      dump(Cycles::toSeconds(now - start));
+      double nowSeconds = Cycles::toSeconds(now - start);
+      dump(nowSeconds, nowSeconds - lastDumpSeconds);
+      lastDumpSeconds = nowSeconds;
       nextDumpTs = nextDumpTs + Cycles::fromSeconds(1.0);
     }
     if (endTs < now || nDone == nThreads)
@@ -99,3 +104,36 @@ Benchmark::entry(size_t threadId)
   ++nDone;
 }
 
+PRNG::PRNG()
+  : x{123456789}
+  , y{362436069}
+  , z{521288629}
+{}
+
+PRNG::PRNG(uint64_t seed)
+  : x{123456789lu * ~(seed << seed)}
+  , y{362436069 * ~(seed << (seed + 1))}
+  , z{521288629 * ~(seed << (seed + 2))}
+{}
+
+void
+PRNG::reseed(uint64_t seed)
+{
+  new (this) PRNG{seed};
+}
+
+uint64_t
+PRNG::operator()()
+{
+  uint64_t t;
+  x ^= x << 16;
+  x ^= x >> 5;
+  x ^= x << 1;
+
+  t = x;
+  x = y;
+  y = z;
+
+  z = t ^ x ^ y;
+  return z;
+}

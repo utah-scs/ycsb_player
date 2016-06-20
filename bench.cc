@@ -16,6 +16,8 @@
 // adds a new field.
 bool UPDATE_CHANGED_VALUE_LENGTH = true;
 
+static thread_local PRNG prng{};
+
 class SmallFillThenRead : public Benchmark {
   const size_t valueLen;
   const size_t nKeys;
@@ -25,12 +27,18 @@ class SmallFillThenRead : public Benchmark {
   std::atomic<uint64_t> setAttempts;
   std::atomic<uint64_t> setFailures;
 
+  uint64_t lastGetAttempts;
+  uint64_t lastGetFailures;
+
   char randomChars[100000];
 
-  void issueSet(memcached_st* memc, const char* key, size_t valueLen) {
+  void issueSet(memcached_st* memc,
+                const char* key,
+                size_t valueLen)
+  {
     assert(valueLen <= sizeof(randomChars));
-    char* value = &randomChars[random() % (sizeof(randomChars) - valueLen)];
-
+    const char* value =
+      &randomChars[prng()  % (sizeof(randomChars) - valueLen)];
     setAttempts++;
     memcached_return rc =
       memcached_set(memc, key, strlen(key), value, valueLen,
@@ -67,6 +75,10 @@ class SmallFillThenRead : public Benchmark {
     }
   }
 
+  void warmup(size_t threadId) {
+    prng.reseed(threadId);
+  }
+
   // Just do round-robin gets until time is up.
   void run(size_t threadId) {
     size_t key = 0;
@@ -79,13 +91,28 @@ class SmallFillThenRead : public Benchmark {
     }
   }
 
-  void dump(double time) {
+  void dumpHeader() {
+    std::cout << "time" << " "
+              << "getAttempts" << " "
+              << "getFailures" << " "
+              << "setAttempts" << " "
+              << "setFailures" << " "
+              << "okGetsPerSec" << " "
+              << std::endl;
+  }
+
+  void dump(double time, double interval) {
+    const uint64_t intervalGetAttempts = getAttempts - lastGetAttempts;
+    const uint64_t intervalGetFailures = getFailures - lastGetFailures;
     std::cout << time << " "
               << getAttempts << " "
               << getFailures << " "
               << setAttempts << " "
               << setFailures << " "
+              << (intervalGetAttempts - intervalGetFailures) / interval << " "
               << std::endl;
+    lastGetAttempts = getAttempts;
+    lastGetFailures = getFailures;
   }
 
  public:
@@ -98,6 +125,8 @@ class SmallFillThenRead : public Benchmark {
     , getFailures{}
     , setAttempts{}
     , setFailures{}
+    , lastGetAttempts{}
+    , lastGetFailures{}
   {
     for (size_t i = 0; i < sizeof(randomChars); ++i)
       randomChars[i] = '!' + (random() % ('~' - '!' + 1));
