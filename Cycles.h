@@ -51,7 +51,7 @@ class Cycles {
     static uint64_t toNanoseconds(uint64_t cycles, double cyclesPerSec = 0);
     static uint64_t fromNanoseconds(uint64_t ns, double cyclesPerSec = 0);
 
-  PRIVATE:
+  private:
     Cycles();
 
     /// Conversion factor between cycles and the seconds; computed by

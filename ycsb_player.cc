@@ -13,7 +13,7 @@
 #define PRIVATE private
 #include "Cycles.h"
 
-static const bool takeLatencySamples = true;
+static const bool takeLatencySamples = false;
 static const size_t maxSamples = 1 * 1000 * 1000;
 
 int VALUE_LENGTH = 25;
