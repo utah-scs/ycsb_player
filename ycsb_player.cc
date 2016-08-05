@@ -147,7 +147,7 @@ memcachedThread()
         exit(1);
     }
 
-    memcached_server_st* servers = memcached_server_list_append(NULL, "127.0.0.1", 11211, &rc);
+    memcached_server_st* servers = memcached_server_list_append(NULL, "127.0.0.1", 12000, &rc);
     if (servers == NULL) {
         fprintf(stderr, "memcached_server_list_append failed: %d\n", (int)rc);
         exit(1);
