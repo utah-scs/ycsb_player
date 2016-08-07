@@ -150,7 +150,7 @@ int main(int argc, char* argv[]) {
   double seconds = 10.0;
   size_t valueLen = 1024;
   size_t nKeys = 10000;
-  size_t port = 11211;
+  size_t port = 12000;
 
   int c;
   while ((c = getopt(argc, argv, "t:s:k:T:p:")) != -1) {
@@ -178,6 +178,8 @@ int main(int argc, char* argv[]) {
   }
 
   SmallFillThenRead bench{port, nThreads, seconds, valueLen, nKeys};
+  printf(stdout, "nthreads: %d seconds: %f valuelen: %d nkeys: %d",
+      nThreads, seconds, valueLen, nKeys);
   bench.start();
 
   return 0;
