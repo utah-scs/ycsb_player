@@ -4,7 +4,7 @@
 #include <atomic>
 #include <cassert>
 #include <string>
-
+#include <stdio.h>
 #include <unistd.h>
 
 #include <libmemcached/memcached.h>
@@ -178,7 +178,7 @@ int main(int argc, char* argv[]) {
   }
 
   SmallFillThenRead bench{port, nThreads, seconds, valueLen, nKeys};
-  printf(stdout, "nthreads: %d seconds: %f valuelen: %d nkeys: %d",
+  fprintf(stdout, "nthreads: %lu seconds: %f valuelen: %lu nkeys: %lu",
       nThreads, seconds, valueLen, nKeys);
   bench.start();
 
