@@ -19,17 +19,6 @@ Benchmark::Benchmark(size_t port, size_t nThreads, double seconds)
   , stop{}
   , nDone{}
 {
-}
-
-Benchmark::~Benchmark()
-{
-  for (auto& memc : clients)
-    memcached_free(memc);
-}
-
-void
-Benchmark::start()
-{
   for (size_t i = 0; i < nThreads; ++i) {
     memcached_st* memc = memcached_create(NULL);
 
@@ -56,7 +45,17 @@ Benchmark::start()
 
     clients.emplace_back(memc);
   }
+}
 
+Benchmark::~Benchmark()
+{
+  for (auto& memc : clients)
+    memcached_free(memc);
+}
+
+void
+Benchmark::start()
+{
   dumpHeader();
 
   for (size_t i = 0; i < nThreads; ++i)

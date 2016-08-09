@@ -136,12 +136,12 @@ class SmallFillThenRead : public Benchmark {
   // This happens on the main thread, so it happens just once in the order
   // specified.
   void start() {
-    Benchmark::start();
-
     for (uint64_t key = 0; key < nKeys; ++key) {
       const std::string keyStr = "user" + std::to_string(key);
       issueSet(getClient(0), keyStr.c_str(), valueLen);
     }
+
+    Benchmark::start();
   }
 };
 
